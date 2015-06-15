@@ -1,0 +1,122 @@
+---
+title: "Prediction of form from a Weight Lifting Exercise dataset"
+output: html_document
+---
+## Summary
+There have been many attempts to use machine learning to quantify <i>how much</i> of an exercise is performed through recorded sensor readings, but it is more difficult to determine <i>how well</i> each exercise is performed (i.e. is the exercise performed with good form).
+
+It turns out to be very easy and accurate to predict how well an exercise ("Unilateral Dumbbell Biceps Curl") was performed using random forests.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
+  library(data.table)
+  library(caret)
+  library(doParallel)
+  numCores <- detectCores()
+  registerDoParallel(numCores)
+  library(randomForest)
+
+  # use the helper function from the Coursera website
+  pml_write_files = function(x){
+    n = length(x)
+    for(i in 1:n){
+      filename = paste0("problem_id_",i,".txt")
+      write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+    }
+  }
+
+  # set the seed for repeatable results
+  set.seed(123456)
+```
+
+### Data
+This paper utilizes a dataset from: http://groupware.les.inf.puc-rio.br/har
+
+The data consists of 160 variables from wearable sensors along with the outcome of 'classe', which is a factor that classifies how well the participant performed the exercise.
+
+Class | Form
+----- | ------
+A     | exactly according to the specification
+B     | throwing the elbows to the front
+C     | lifting the dumbbell only halfway
+D     | lowering the dumbbell only halfway
+E     | throwing the hips to the front
+
+Read more: http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises#ixzz3dATyBIcd
+
+```{r}
+  trainingFile <- "pml-training.csv"
+  testingFile <- "pml-testing.csv"
+  if(!file.exists(trainingFile)){
+    download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", destfile=trainingFile, method="curl")
+    download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", destfile=testingFile, method="curl")
+  }
+
+  t <- read.csv(trainingFile, na.strings=c("NA","NaN", " ", "#DIV/0!"))
+```
+
+### Cleaning up the data
+The most obvious issues to clean in these datasets were the number of NA variations (for example, this data was probably pulled from a spreadsheet, there was a large amount of "#DIV/0!" values).  These were converted into NA values.
+
+There were also a large number of columns with a high proportion of NA values.  Any column with over 50% NA values was removed from the dataset since they would not be useful in the predictions.
+
+```{r]}
+  na.threshold = 0.5
+  cleanData <- t[,colMeans(is.na(t[,])) < na.threshold]
+  
+  # remove bookeeping fields that can skew the model, e.g. we don't want subject name, time fields, windows, etc...
+  cleanData <- cleanData[,8:60]
+
+  # the random forest takes an inordinate amount of time to run, so we're forced to try splitting the training set into
+  # a much smaller sample and see if that yields accurate predictions (it does)
+  inTrain <- createDataPartition(y=cleanData$classe, p=0.7, list = TRUE)[[1]]
+  
+  training <- cleanData[inTrain,]
+  testing <- cleanData[-inTrain,]
+  t <- cleanData <- NULL
+```
+
+### Model Training
+A random forest was trained by using all the predictors in the dataset.  First, however, we tuned the random forest using the training dataset to see what the optimal value for 'mtry' would be. ('mtry' is the number of predictor variables to choose at random from in each node of the tree)
+
+Originally, the model was trained using the 'caret' package, this led to an accuracy of approx. 99.3% but took almost an hour to run on the author's hardware.
+
+Using the 'randomForest' method directly (after tuning) took a couple minutes.
+
+```{r}
+  # tune on all the variables in the set, except for the last which is our outcome, 'classe'
+  bestmtry <- tuneRF(training[-53], training$classe, ntreeTry=150, trace=TRUE, plot=TRUE, dobest=FALSE)
+
+  # the tuneRF algo chose 7 as the best mtry to use
+  rf.model <-randomForest(classe~., data=training, mtry=7, ntree=150, keep.forest=TRUE, importance=TRUE)
+```
+
+Predict using the model and the testing data.
+
+```{r}
+  rfpred2 <- predict(rf.model, newdata = testing)
+  rfpred2.accuracy <- sum(rfpred2 == testing$classe)/nrow(testing)
+```
+
+Our random forest model had an accuracy of `r rfpred2.accuracy` against our testing partition.  This is less than 1% error.
+
+### Predictions
+The same data cleansing process was repeated for the supplied testing set (which consisted of 20 observations).  The trained model was then used to predict the corresponding class of exercise.
+
+```{r}
+  t <- read.csv(testingFile, na.strings=c("NA","NaN", " ", "#DIV/0!"))
+  cleanData <- t[,colMeans(is.na(t[,])) < na.threshold]
+  testing <- cleanData[,8:60]
+
+  testing.predictions <- predict(rf.model, newdata = testing)
+
+  # use the supplied function to write 20 individual files with the prediction for each test case
+  # pml_write_files(as.character(testing.predictions))
+```
+
+### Appendix
+We attempted to build the random forest model using the 'caret' package originally.  This takes a ^really^ long time on a quad-core machine with 8GB memory and did not obtain any higher accuracy than the method above.
+```{r eval=FALSE}
+  rfModel <- train(classe ~ ., method="rf", data = training)
+  rfpred <- predict(rfModel, newdata = testing)
+  rfpred.accuracy <- sum(rfpred == testing$classe)/nrow(testing)
+```
